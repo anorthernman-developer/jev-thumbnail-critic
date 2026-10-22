@@ -1,0 +1,87 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Deploy preview
+        if: github.event_name == 'pull_request'
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$NETLIFY_AUTH_TOKEN"
+          test -n "$NETLIFY_SITE_ID"
+          npx --yes netlify-cli@27.14.1 deploy \
+            --no-build \
+            --dir=dist \
+            --functions=netlify/functions \
+            --site "$NETLIFY_SITE_ID" \
+            --alias "pr-${{ github.event.pull_request.number }}" \
+            --message "PR ${{ github.event.pull_request.number }}" \
+            --json > deploy.raw
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from "node:fs";
+          const raw = readFileSync("deploy.raw", "utf8");
+          const start = raw.indexOf("{");
+          const end = raw.lastIndexOf("}");
+          if (start === -1 || end === -1) {
+            console.log(raw);
+            process.exit(1);
+          }
+          const data = JSON.parse(raw.slice(start, end + 1));
+          const url = data.deploy_url || data.url || "";
+          console.log(url);
+          if (process.env.GITHUB_STEP_SUMMARY && url) {
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Preview\n\n${url}\n`);
+          }
+          NODE
+      - name: Deploy production
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$NETLIFY_AUTH_TOKEN"
+          test -n "$NETLIFY_SITE_ID"
+          npx --yes netlify-cli@27.14.1 deploy \
+            --no-build \
+            --prod \
+            --dir=dist \
+            --functions=netlify/functions \
+            --site "$NETLIFY_SITE_ID" \
+            --message "main"
